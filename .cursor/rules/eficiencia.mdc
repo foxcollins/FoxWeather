@@ -1,0 +1,28 @@
+---
+description: Reglas de eficiencia de tokens — aplicar siempre al trabajar en este repo.
+globs: "*"
+---
+
+# Eficiencia de tokens
+
+1. Agrupar tool calls independientes en un solo mensaje.
+2. Para buscar/preguntar el código, delegar a la exploración y usar solo resúmenes; no duplicar esa búsqueda.
+3. Preferir grep/glob acotado a lecturas completas; usar offset/limit en reads.
+4. Escribir cada archivo en un solo write; evitar cadenas de edits triviales.
+5. Ejecutar lint/tests una sola vez al final, no tras cada cambio.
+6. Respuestas cortas; no reimprimir salidas, diffs ni archivos ya mostrados.
+7. Para docs de librerías usar Context7 o websearch en vez de webfetch de páginas enteras.
+8. No releer archivos ya leídos en la conversación.
+
+## Proyecto
+
+App Android de clima ambiental: Kotlin + Compose + Canvas/Particle System.
+Leer `README.md`, `PROJECT.md` y `docs/` antes de tocar código.
+
+## Convenciones
+
+- Código y docs en español cuando aplique (campos/API en inglés).
+- Datos separados de la representación: `WeatherState`, `EnvironmentState`.
+- Capas composables; nunca una escena por combinación de clima.
+- Rendering adaptativo y ahorro de batería desde el inicio.
+- No implementar features que no superen la regla de desarrollo (PROJECT.md §34).

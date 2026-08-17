@@ -53,6 +53,7 @@ fun RainPrototypeScreen(modifier: Modifier = Modifier) {
     LaunchedEffect(intensity, targetFps) {
         var lastRender = 0L
         var nextFrameAt = 0L
+        var nextLabelAt = 0L
         val frameNanos = 1_000_000_000L / targetFps
         while (isActive) {
             val now = withFrameNanos { it }
@@ -67,7 +68,10 @@ fun RainPrototypeScreen(modifier: Modifier = Modifier) {
                 height = screenSize.height.toFloat(),
                 intensity = intensity,
             )
-            particleCount = system.count
+            if (now >= nextLabelAt) {
+                particleCount = system.count
+                nextLabelAt = now + 1_000_000_000L
+            }
             frame++
         }
     }

@@ -45,7 +45,7 @@ class DropletSystem {
 
     val count: Int get() = drops.size
 
-    fun update(dt: Float, width: Float, height: Float, intensity: RainIntensity) {
+    fun update(dt: Float, width: Float, height: Float, intensity: RainIntensity, maxDrops: Int = 320) {
         if (width <= 0f || height <= 0f || dt <= 0f) return
         val cappedDt = min(dt, 0.05f)
         val density = when (intensity) {
@@ -53,11 +53,12 @@ class DropletSystem {
             RainIntensity.MEDIUM -> 1.3f
             RainIntensity.HIGH -> 1.9f
         }
+        val cap = maxDrops.coerceIn(40, 320)
 
         // Condensación tipo "cristal mojado": gotas grandes y medianas por todo
         // el cristal (más denso arriba), bien separadas entre sí.
         spawnAcc += density * 9f * cappedDt
-        while (spawnAcc >= 1f && drops.size < 320) {
+        while (spawnAcc >= 1f && drops.size < cap) {
             spawnAcc -= 1f
             val x = random.nextFloat() * width
             val y = random.nextFloat() * height * 0.82f

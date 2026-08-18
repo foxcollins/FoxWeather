@@ -108,6 +108,7 @@ class WeatherWallpaperService : WallpaperService() {
         private var baseFps = 30
         private var intensity = RainIntensity.MEDIUM
         private var battery = BatteryState.NORMAL
+        private var frameCounter = 0
 
         private val batteryReceiver = object : BroadcastReceiver() {
             override fun onReceive(c: Context?, intent: Intent?) {
@@ -128,7 +129,7 @@ class WeatherWallpaperService : WallpaperService() {
             intensity = prefs.getString(KEY_INTENSITY, null)
                 ?.let { runCatching { RainIntensity.valueOf(it) }.getOrNull() }
                 ?: RainIntensity.MEDIUM
-            baseFps = prefs.getInt(KEY_FPS, 30).coerceIn(1, 60)
+            baseFps = prefs.getInt(KEY_FPS, 20).coerceIn(1, 30)
             targetFps = baseFps
             recreateBackground()
             refreshBattery()
@@ -277,7 +278,7 @@ class WeatherWallpaperService : WallpaperService() {
                 lightning.update(dt)
                 drawCloudsAndroid(c, w, h)
                 if (effect.fog) drawFogAndroid(c, w, h)
-                droplets.update(dt, w, h, effect.intensity)
+                droplets.update(dt, w, h, effect.intensity, maxDrops = 60)
                 when (effect.kind) {
                     PrecipitationKind.SNOW, PrecipitationKind.HAIL -> {
                         val isHail = effect.kind == PrecipitationKind.HAIL
@@ -297,10 +298,14 @@ class WeatherWallpaperService : WallpaperService() {
                     }
                 }
                 if (effect.lightning) drawLightningAndroid(c, w, h)
-                // Capa Wet Glass: gotas sobre el cristal en condiciones de lluvia.
-                if (effect.kind == PrecipitationKind.RAIN || effect.kind == PrecipitationKind.DRIZZLE) {
+                // Capa Wet Glass: gotas sobre el cristal en condiciones de lluvia,
+                // dibujadas cada 2º frame para reducir coste (FASE 7).
+                if (frameCounter % 2 == 0 &&
+                    (effect.kind == PrecipitationKind.RAIN || effect.kind == PrecipitationKind.DRIZZLE)
+                ) {
                     drawDropletsAndroid(c, w, h)
                 }
+                frameCounter++
             } finally {
                 if (c != null) surfaceHolder.unlockCanvasAndPost(c)
             }

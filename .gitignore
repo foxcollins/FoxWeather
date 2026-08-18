@@ -27,3 +27,4 @@ hs_err_pid*
 # Assets externos con licencia (no commitear sin verificar)
 assets/references/*
 !assets/references/.gitkeep
+!assets/references/water-on-glass/

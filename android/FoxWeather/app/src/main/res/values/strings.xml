@@ -6,4 +6,13 @@
     <string name="label_low">LOW</string>
     <string name="label_med">MED</string>
     <string name="label_high">HIGH</string>
+    <string name="label_rain">LLUVIA</string>
+    <string name="label_crystal">CRISTAL</string>
+    <string name="label_particles">partículas</string>
+    <string name="label_drops">gotas</string>
+    <string name="label_activate_wallpaper">ACTIVAR WALLPAPER</string>
+    <string name="label_weather">CLIMA</string>
+    <string name="label_bg_scene">FONDO ESCENA</string>
+    <string name="label_bg_image">FONDO IMAGEN</string>
+    <string name="wallpaper_description">Clima ambiental animado detrás de tus iconos</string>
 </resources>

@@ -4,6 +4,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -53,6 +54,14 @@ import com.foxcode.foxweather.weather.PrecipitationKind
 import com.foxcode.foxweather.weather.WeatherCondition
 import com.foxcode.foxweather.weather.WeatherEffects
 import com.foxcode.foxweather.weather.WeatherState
+import com.foxcode.foxweather.weather.OpenMeteoClient
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.io.File
 import java.time.ZoneId
 import java.time.ZonedDateTime
@@ -76,8 +85,9 @@ class WeatherWallpaperService : WallpaperService() {
 
         private val rain = RainParticleSystem()
         private val handler = Handler(Looper.getMainLooper())
+        private val weatherScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         private val scene = SkyScene()
-        private val cycle = DayCycle(SettingsStore.DEFAULT_LAT, SettingsStore.DEFAULT_LON)
+        private var cycle = dayCycle()
         private val clouds = CloudSystem()
         private val fogLayer = FogLayer()
         private val lightning = LightningSystem()
@@ -116,6 +126,17 @@ class WeatherWallpaperService : WallpaperService() {
             }
         }
 
+        private val prefsListener = SharedPreferences.OnSharedPreferenceChangeListener { p, key ->
+            if (key == SettingsStore.KEY_LATITUDE || key == SettingsStore.KEY_LONGITUDE) {
+                cycle = dayCycle()
+            }
+        }
+
+        private fun dayCycle(): DayCycle {
+            val (lat, lon) = SettingsStore.location(applicationContext)
+            return DayCycle(lat, lon)
+        }
+
         private val frame = object : Runnable {
             override fun run() {
                 drawFrame()
@@ -140,10 +161,32 @@ class WeatherWallpaperService : WallpaperService() {
                 addAction(Intent.ACTION_BATTERY_CHANGED)
             }
             registerReceiver(batteryReceiver, filter)
+            prefs().registerOnSharedPreferenceChangeListener(prefsListener)
+            refreshWeatherLoop()
+        }
+
+        /** Delegado por el ciclo de visibilidad para no chocar con onCreate. */
+        private fun refreshWeatherLoop() {
+            weatherScope.launch {
+                while (isActive) {
+                    refreshLiveWeather()
+                    delay(30 * 60 * 1000L)
+                }
+            }
+        }
+
+        /** Consulta Open-Meteo para la ubicación guardada y cachea el estado. */
+        private suspend fun refreshLiveWeather() {
+            val (lat, lon) = SettingsStore.location(applicationContext)
+            val ws = runCatching { OpenMeteoClient.currentWeather(lat, lon) }.getOrNull()
+                ?: return
+            SettingsStore.saveLiveWeather(applicationContext, ws)
         }
 
         override fun onDestroy() {
             runCatching { unregisterReceiver(batteryReceiver) }
+            prefs().unregisterOnSharedPreferenceChangeListener(prefsListener)
+            weatherScope.cancel()
             stopLoop()
             super.onDestroy()
         }
@@ -194,18 +237,20 @@ class WeatherWallpaperService : WallpaperService() {
                 ?.let { runCatching { WeatherCondition.valueOf(it) }.getOrNull() }
                 ?: WeatherCondition.RAIN
 
-        /** Efecto de partículas para la condición activa. */
+        /** Efecto de partículas para la condición activa (clima real si existe). */
         private fun currentEffect() =
-            WeatherEffects.resolve(
-                WeatherState(
-                    condition = currentCondition(),
-                    temperature = 20f,
-                    precipitation = 5f,
-                    windSpeed = 8f,
-                    humidity = 60f,
-                    cloudCover = 0.7f,
-                    timestamp = System.currentTimeMillis(),
-                )
+            WeatherEffects.resolve(currentState())
+
+        /** Estado real cacheado, o el manual/predefinido si no hay red aún. */
+        private fun currentState(): WeatherState =
+            SettingsStore.liveWeather(applicationContext) ?: WeatherState(
+                condition = currentCondition(),
+                temperature = 20f,
+                precipitation = 5f,
+                windSpeed = 8f,
+                humidity = 60f,
+                cloudCover = 0.7f,
+                timestamp = System.currentTimeMillis(),
             )
 
         private fun drawBackground(c: Canvas, w: Float, h: Float) {

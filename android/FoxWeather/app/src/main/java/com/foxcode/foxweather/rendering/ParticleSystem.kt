@@ -39,6 +39,13 @@ class RainParticleSystem {
         kind = newKind
         val cfg = config(intensity)
 
+        // Cielo despejado: sin precipitación y sin partículas residuales.
+        if (newKind == PrecipitationKind.NONE) {
+            particles.clear()
+            spawnAccum = 0f
+            return
+        }
+
         // Spawn
         spawnAccum += cfg.spawnPerSecond * dt
         var spawns = spawnAccum.toInt()

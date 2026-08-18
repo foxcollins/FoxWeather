@@ -30,7 +30,14 @@ data class WeatherEffect(
     val cloudCover: Float,
     val fog: Boolean,
     val lightning: Boolean,
-)
+) {
+    /** Viento previsto para la condición (define velocidad/deriva de partículas y nubes). */
+    val wind: Float = when (kind) {
+        PrecipitationKind.HAIL -> 1.4f
+        PrecipitationKind.NONE -> 0.4f
+        else -> 1f
+    }
+}
 
 /** Mapeo condición -> efecto. Los thresholds se calibrarán en FASE 3. */
 object WeatherEffects {

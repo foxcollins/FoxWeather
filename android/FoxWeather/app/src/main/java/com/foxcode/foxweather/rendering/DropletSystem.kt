@@ -5,21 +5,33 @@ import kotlin.math.min
 import kotlin.random.Random
 
 /**
- * Gota de agua sobre un cristal. Comportamiento físico simplificado:
- *  - nace como micro-gota (condensación);
- *  - coalesce al acercarse a otra (volumen conservado);
- *  - desliza más rápido cuanto más grande;
- *  - al llegar al borde inferior se desprende y cae (gota corriente);
- *  - deja residuos (estela) que se evaporan.
+ * Gota de agua sobre vidrio (Wet Glass, FASE 6). Comportamiento físico:
+ *  - pocas gotas nacen por condensación en el tercio superior;
+ *  - las chicas se quedan quietas (casi transparentes, casi puntuales);
+ *  - las que crecen cruzan el umbral de tensión superficial y empiezan a
+ *    deslizar, cada vez más rápido cuanto más grandes;
+ *  - una gota "corriente" se estira y deja una estela que lava el cristal;
+ *  - al llegar al borde inferior se desprenden y caen.
  */
 class Droplet(
     var x: Float,
     var y: Float,
     var r: Float,
+    var running: Boolean = false,     // desliza como corriente
+    var stretch: Float = 0f,          // elongación vertical 0..1
     var vy: Float = 0f,
     var falling: Boolean = false,
     var evaporating: Boolean = false,
     var wobble: Float = 0f,
+)
+
+/** Estela vertical que una gota corriente ha lavado en el vidrio. */
+class Trail(
+    var x: Float,
+    var topY: Float,
+    var length: Float,
+    var width: Float,
+    var alpha: Float,
 )
 
 class DropletSystem {
@@ -29,6 +41,7 @@ class DropletSystem {
     private var trailAcc = 0f
 
     val drops = ArrayList<Droplet>()
+    val trails = ArrayList<Trail>()
 
     val count: Int get() = drops.size
 
@@ -36,89 +49,132 @@ class DropletSystem {
         if (width <= 0f || height <= 0f || dt <= 0f) return
         val cappedDt = min(dt, 0.05f)
         val density = when (intensity) {
-            RainIntensity.LOW -> 0.5f
-            RainIntensity.MEDIUM -> 1f
-            RainIntensity.HIGH -> 1.8f
+            RainIntensity.LOW -> 0.7f
+            RainIntensity.MEDIUM -> 1.3f
+            RainIntensity.HIGH -> 1.9f
         }
 
-        // Condensación: micro-gotas
-        spawnAcc += density * 16f * cappedDt
-        while (spawnAcc >= 1f && drops.size < 280) {
+        // Condensación tipo "cristal mojado": gotas grandes y medianas por todo
+        // el cristal (más denso arriba), bien separadas entre sí.
+        spawnAcc += density * 9f * cappedDt
+        while (spawnAcc >= 1f && drops.size < 320) {
             spawnAcc -= 1f
-            drops += Droplet(
-                x = random.nextFloat() * width,
-                y = random.nextFloat() * height * 0.7f,
-                r = random.nextFloat() * 2.2f + 1.4f,
-                wobble = random.nextFloat() * (2f * Math.PI).toFloat(),
-            )
+            val x = random.nextFloat() * width
+            val y = random.nextFloat() * height * 0.82f
+            // Distribución de tamaño: mayoría medianas + algunas grandes.
+            val r = when (val roll = random.nextFloat()) {
+                in 0f..0.12f -> 8f + random.nextFloat() * 6f      // grandes
+                in 0.12f..0.45f -> 4f + random.nextFloat() * 4f   // medianas
+                else -> 2f + random.nextFloat() * 2f              // pequeñas
+            }
+            if (drops.none { d ->
+                    val dx = d.x - x
+                    val dy = d.y - y
+                    dx * dx + dy * dy < (d.r + r + 5f) * (d.r + r + 5f)
+                }
+            ) {
+                drops += Droplet(
+                    x = x, y = y, r = r,
+                    wobble = random.nextFloat() * (2f * Math.PI).toFloat(),
+                )
+            }
         }
 
         for (d in drops) {
             if (d.evaporating) {
-                d.r -= (2f + density) * cappedDt
-                if (d.r <= 0.35f) d.r = -1f // señal de muerte
+                d.r -= (1.3f + density) * cappedDt
+                if (d.r <= 0.4f) d.r = -1f
                 continue
             }
 
             if (!d.falling) {
-                // Deslizamiento proporcional al exceso de radio (~>3px se mueve)
-                d.vy = (d.r - 3f).coerceAtLeast(0f) * 3.2f
-                d.y += d.vy * cappedDt
+                // Crecen lentamente en reposo; se evaporan con poca probabilidad.
+                if (random.nextFloat() < 2f * density * cappedDt && !d.running) d.r += 0.05f
+                if (random.nextFloat() < 0.5f * cappedDt) d.r *= 0.9997f
 
-                // Crecer/evaporar lentamente en reposo
-                if (random.nextFloat() < 6f * density * cappedDt) d.r += 0.07f
-                if (random.nextFloat() < 3f * cappedDt) d.r *= 0.998f
-
-                // Desprender al llegar al borde inferior
-                if (d.y + d.r * 1.4f >= height - 2f) d.falling = true
-            } else {
-                // Caída libre (gota corriente)
-                d.vy += 2600f * cappedDt
-                d.r *= 0.998f
-                d.y += d.vy * cappedDt
-            }
-        }
-
-        // Estela: las gotas grandes que deslizan dejan residuos que se evaporan
-        trailAcc += cappedDt
-        if (trailAcc >= 0.15f) {
-            trailAcc = 0f
-            val residue = ArrayList<Droplet>()
-            for (d in drops) {
-                if (!d.falling && d.vy > 4f && random.nextFloat() < 0.25f) {
-                    residue += Droplet(
-                        x = d.x + (random.nextFloat() - 0.5f) * d.r * 0.6f,
-                        y = d.y - d.r * 0.6f,
-                        r = d.r * (random.nextFloat() * 0.3f + 0.2f),
-                        evaporating = true,
-                    )
+                // Umbral de tensión superficial: gotas grandes corren antes.
+                val threshold = if (d.r > 6f) 2.4f else 3.4f
+                if (!d.running && d.r > threshold && random.nextFloat() < 0.10f + density * cappedDt * 8f) {
+                    d.running = true
                 }
+
+                if (d.running) {
+                    // Desliza: más rápido cuanto más grande, con leve jadeo.
+                    d.vy = (d.r - 1.6f).coerceAtLeast(0f) * (13f + density * 7f)
+                    d.stretch = (d.stretch + cappedDt * 1.4f).coerceAtMost(0.5f + d.r * 0.05f)
+                    d.y += d.vy * cappedDt
+                    d.x += (random.nextFloat() - 0.5f) * 5f * cappedDt
+                    addTrail(d)
+                }
+            } else {
+                d.vy += 2400f * cappedDt
+                d.y += d.vy * cappedDt
+                d.r *= 0.999f
             }
-            drops += residue
+
+            if (d.y > height - 1f && !d.falling) {
+                d.falling = true
+                d.vy = 0f
+            }
         }
+
+        trailAcc += cappedDt
+        for (t in trails) {
+            t.alpha -= 0.20f * cappedDt
+            t.length *= (1f - 0.12f * cappedDt)
+        }
+        trails.removeAll { it.alpha <= 0.02f }
 
         coalesce()
-        drops.removeAll { it.r <= 0f }
+        drops.removeAll { it.r <= 0f || (it.falling && it.y > height + 400f) }
     }
 
-    /** Junta gotas cercanas: la mayor absorbe a la menor conservando volumen. */
+    private fun addTrail(d: Droplet) {
+        trailAcc += 0f
+        // Busca la estela más cercana y corta en x para fundirla.
+        val existing = trails.firstOrNull {
+            (it.x - d.x).let { dx -> dx * dx } < (d.r * 1.4f) * (d.r * 1.4f)
+        }
+        if (existing != null) {
+            existing.length += d.vy * 0.05f
+            existing.alpha = min(existing.alpha + 0.04f, 0.22f)
+            existing.width = maxOf(existing.width, d.r * 0.5f)
+        } else if (trails.size < 90) {
+            trails += Trail(
+                x = d.x,
+                topY = d.y - d.r,
+                length = d.r * 3f,
+                width = d.r * 0.45f,
+                alpha = 0.18f,
+            )
+        }
+    }
+
+    /** Junta gotas cercanas (coalescencia con volumen conservado) solo si no corren. */
     private fun coalesce() {
         val n = drops.size
         for (i in 0 until n) {
             val a = drops[i]
-            if (a.falling || a.evaporating) continue
+            if (a.falling || a.evaporating || a.running) continue
             for (j in i + 1 until n) {
                 val b = drops[j]
-                if (b.falling || b.evaporating) continue
+                if (b.falling || b.evaporating || b.running) continue
                 val dx = a.x - b.x
                 val dy = a.y - b.y
                 val reach = a.r + b.r
-                if (dx * dx + dy * dy > reach * reach * 0.81f) continue
+                if (dx * dx + dy * dy > reach * reach * 0.64f) continue
                 val keep = if (a.r >= b.r) a else b
                 val absorb = if (a.r >= b.r) b else a
                 keep.r = cbrt(keep.r * keep.r * keep.r + absorb.r * absorb.r * absorb.r).toFloat()
                 absorb.r = -1f
+                // Una gota que engorda puede cruzar el umbral y empezar a correr.
+                if (!keep.running && keep.r > 3f) keep.running = true
             }
         }
+    }
+
+    fun clear() {
+        drops.clear()
+        trails.clear()
     }
 }

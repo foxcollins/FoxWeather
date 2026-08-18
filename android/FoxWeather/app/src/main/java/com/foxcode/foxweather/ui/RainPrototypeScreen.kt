@@ -12,12 +12,16 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -44,6 +48,9 @@ import com.foxcode.foxweather.core.storage.SettingsStore
 import com.foxcode.foxweather.environment.DayCycle
 import com.foxcode.foxweather.environment.TimeOfDay
 import com.foxcode.foxweather.rendering.DropletSystem
+import com.foxcode.foxweather.rendering.CloudSystem
+import com.foxcode.foxweather.rendering.FogLayer
+import com.foxcode.foxweather.rendering.LightningSystem
 import com.foxcode.foxweather.rendering.RainIntensity
 import com.foxcode.foxweather.rendering.RainParticleSystem
 import com.foxcode.foxweather.rendering.RenderEngine
@@ -64,12 +71,23 @@ private enum class SceneMode(val labelRes: Int) {
     CRYSTAL(R.string.label_crystal),
 }
 
+private fun defaultWs() = WeatherState(
+    condition = WeatherCondition.RAIN,
+    temperature = 20f,
+    precipitation = 5f,
+    windSpeed = 8f,
+    humidity = 60f,
+    cloudCover = 0.7f,
+    timestamp = System.currentTimeMillis(),
+)
+
 /**
  * Pantalla de prueba del prototipo (Sprint 0):
  * - LLUVIA: partículas de lluvia en Canvas.
  * - CRISTAL: gotas de agua que condensan, se deslizan, coalescen y caen.
  * Control de intensidad (LOW/MED/HIGH) y FPS objetivo (15/30/60).
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun RainPrototypeScreen(modifier: Modifier = Modifier) {
     val context = LocalContext.current
@@ -83,11 +101,15 @@ fun RainPrototypeScreen(modifier: Modifier = Modifier) {
     var animT by remember { mutableFloatStateOf(0f) }
     var screenSize by remember { mutableStateOf(IntSize.Zero) }
     var showWeather by remember { mutableStateOf(false) }
+    var activeEffect by remember { mutableStateOf(WeatherEffects.resolve(defaultWs())) }
 
     val rain = remember { RainParticleSystem() }
     val droplets = remember { DropletSystem() }
     val scene = remember { SkyScene() }
     val cycle = remember { DayCycle(SettingsStore.DEFAULT_LAT, SettingsStore.DEFAULT_LON) }
+    val clouds = remember { CloudSystem() }
+    val fog = remember { FogLayer() }
+    val lightning = remember { LightningSystem() }
 
     LaunchedEffect(mode, intensity, condition, targetFps) {
         var lastRender = 0L
@@ -113,6 +135,10 @@ fun RainPrototypeScreen(modifier: Modifier = Modifier) {
                 timestamp = System.currentTimeMillis(),
             )
             val effect = WeatherEffects.resolve(ws)
+            activeEffect = effect
+            clouds.setCover(effect.cloudCover)
+            clouds.update(dt, effect.wind)
+            lightning.update(dt)
             when (mode) {
                 SceneMode.RAIN -> rain.update(dt, w, h, intensity, effect.kind)
                 SceneMode.CRYSTAL -> droplets.update(dt, w, h, intensity)
@@ -150,11 +176,24 @@ fun RainPrototypeScreen(modifier: Modifier = Modifier) {
             frame // fuerza el redibujado al cambiar el frame
             val now = ZonedDateTime.now()
             val tod = sceneOverride ?: cycle.timeOfDay(now)
+            val effect = activeEffect
             with(RenderEngine) {
                 drawSkyScene(scene, tod, cycle.dayProgress(now), MoonCalculator.ageFraction(now).toFloat(), animT)
+                drawClouds(clouds, effect.cloudCover)
+                if (effect.fog) drawFog(fog)
                 when (mode) {
-                    SceneMode.RAIN -> drawPrecipitation(rain)
-                    SceneMode.CRYSTAL -> drawDroplets(droplets)
+                    SceneMode.RAIN -> {
+                        drawPrecipitation(rain)
+                        if (effect.lightning) drawLightning(lightning, animT)
+                    }
+                    SceneMode.CRYSTAL -> {
+                        val (top, horizon) = when (tod) {
+                            TimeOfDay.DAY -> com.foxcode.foxweather.ui.theme.DaySkyTop to com.foxcode.foxweather.ui.theme.DaySkyHorizon
+                            TimeOfDay.SUNRISE, TimeOfDay.SUNSET -> com.foxcode.foxweather.ui.theme.DuskSkyTop to com.foxcode.foxweather.ui.theme.DuskSkyHorizon
+                            TimeOfDay.NIGHT -> com.foxcode.foxweather.ui.theme.SkyTop to com.foxcode.foxweather.ui.theme.SkyHorizon
+                        }
+                        drawDroplets(droplets, top, horizon)
+                    }
                 }
             }
         }
@@ -199,7 +238,8 @@ fun RainPrototypeScreen(modifier: Modifier = Modifier) {
         Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
-                .padding(bottom = 24.dp),
+                .padding(bottom = 24.dp)
+                .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
             Row(
@@ -241,18 +281,31 @@ fun RainPrototypeScreen(modifier: Modifier = Modifier) {
             }
             if (showWeather) {
                 Spacer(Modifier.height(8.dp))
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     WeatherCondition.entries.forEach { c ->
-                        OutlinedButton(onClick = {
-                            condition = c
-                            SettingsStore.prefs(context).edit()
-                                .putString(SettingsStore.KEY_WEATHER, c.name)
-                                .apply()
-                        }) {
-                            Text(c.name)
+                        val selected = condition == c
+                        if (selected) {
+                            Button(onClick = {
+                                condition = c
+                                SettingsStore.prefs(context).edit()
+                                    .putString(SettingsStore.KEY_WEATHER, c.name)
+                                    .apply()
+                            }) {
+                                Text(if (c.name.length > 8) c.name.take(6) + "." else c.name)
+                            }
+                        } else {
+                            OutlinedButton(onClick = {
+                                condition = c
+                                SettingsStore.prefs(context).edit()
+                                    .putString(SettingsStore.KEY_WEATHER, c.name)
+                                    .apply()
+                            }) {
+                                Text(if (c.name.length > 8) c.name.take(6) + "." else c.name)
+                            }
                         }
                     }
                 }

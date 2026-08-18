@@ -1,11 +1,15 @@
 package com.foxcode.foxweather.rendering
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipPath
 import com.foxcode.foxweather.environment.TimeOfDay
 import com.foxcode.foxweather.scenes.NightScene
 import com.foxcode.foxweather.scenes.SkyScene
@@ -145,29 +149,194 @@ object RenderEngine {
         }
     }
 
+    /** Nubes: puffs de color cielo apagado (Cloud Layer). */
+    fun DrawScope.drawClouds(system: CloudSystem, cover: Float, alpha: Float = 1f) {
+        val w = size.width
+        val h = size.height
+        for (c in system.clouds) {
+            val cx = c.nx * w
+            val cy = c.ny * h
+            val cw = c.w * w
+            val ch = c.h * h
+            val col = Color.White.copy(alpha = c.alpha.coerceAtMost(cover * 1.2f) * alpha)
+            for (i in c.puffs.indices) {
+                val frac = i.toFloat() / (c.puffs.size - 1)
+                val px = cx - cw * 0.35f + cw * 0.7f * frac
+                val py = cy + sin(frac * 3.14f) * ch * 0.35f
+                drawCircle(color = col, radius = c.puffs[i] * cw, center = Offset(px, py))
+            }
+        }
+    }
+
+    /** Niebla: baños anchos translúcidos cerca del horizonte (Fog Layer). */
+    fun DrawScope.drawFog(system: FogLayer, alpha: Float = 1f) {
+        val w = size.width
+        val h = size.height
+        for (b in system.bands) {
+            val y = b.ny * h
+            val bw = w * 1.8f
+            val bh = b.h * h
+            drawRect(
+                color = Color.White.copy(alpha = b.alpha * alpha),
+                topLeft = Offset(b.nx * w * 0.5f, y - bh / 2),
+                size = androidx.compose.ui.geometry.Size(bw, bh),
+            )
+        }
+    }
+
+    /** Relámpago: flash global + rayo (Lightning Layer). */
+    fun DrawScope.drawLightning(system: LightningSystem, time: Float) {
+        if (system.flashAlpha > 0.001f) {
+            drawRect(
+                color = Color.White.copy(alpha = system.flashAlpha),
+                size = this.size,
+            )
+        }
+        if (system.active && system.phase == LightningSystem.Phase.STRIKE) {
+            val w = size.width
+            val h = size.height
+            val path = Path()
+            system.bolt.forEachIndexed { i, (nx, ny) ->
+                val x = nx * w
+                val y = ny * h
+                if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            }
+            // Añade ramas secundarias cortas para efecto ramificado
+            bolatBranch(system.bolt, w, h, path)
+            drawPath(path, color = Color.White, style = androidx.compose.ui.graphics.drawscope.Stroke(width = 3f, cap = StrokeCap.Round))
+            drawPath(path, color = Color(0xFFBBD4FF), style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1.5f))
+        }
+    }
+
+    private fun DrawScope.bolatBranch(bolt: List<Pair<Float, Float>>, w: Float, h: Float, path: Path) {
+        if (bolt.size < 2) return
+        for (i in 1 until bolt.size step 2) {
+            val (nx, ny) = bolt[i]
+            val bx = nx * w
+            val by = ny * h
+            val off = 0.04f + (i % 3) * 0.02f
+            path.moveTo(bx, by)
+            path.lineTo(bx + off * w * (if (i % 2 == 0) 1f else -1f), by - off * h)
+        }
+    }
+
     /**
-     * Gotas de cristal: esfera de agua con sombra interior y brillo
-     * especular en el cuadrante superior-izquierdo (luz virtual).
+     * Wet Glass: pantalla mojada con gotas grandes tipo "cuenta de agua".
+     * Cada gota:
+     *  - interior = lente que refracta el cielo (más claro arriba);
+     *  - borde inferior oscuro y grueso (la masa de agua captura la luz);
+     *  - arco especular brillante arriba + punto de luz;
+     *  - halo de humedad alrededor (refracción suave del contorno);
+     *  - corrientes estiradas con estela que lava el cristal.
      */
-    fun DrawScope.drawDroplets(system: DropletSystem) {
+    fun DrawScope.drawDroplets(
+        system: DropletSystem,
+        top: Color = SkyTop,
+        horizon: Color = SkyHorizon,
+    ) {
+        // 0) Estelas lavadas (tenue, detrás de todo).
+        for (t in system.trails) {
+            drawRect(
+                color = Color.White.copy(alpha = t.alpha),
+                topLeft = Offset(t.x - t.width / 2, t.topY),
+                size = Size(t.width, t.length),
+            )
+        }
+
         for (d in system.drops) {
+            if (d.falling) continue
             val r = max(d.r, 0.5f)
-            val c = Offset(d.x, d.y)
-            drawCircle(
-                color = GlassDrop.copy(alpha = 0.6f),
-                radius = r,
-                center = c,
+            val x = d.x
+            val y = d.y
+            val evap = d.evaporating
+            val bodyH = r * (if (d.running) 1f + d.stretch else 1f)
+            val bodyTop = y - bodyH / 2
+
+            // 1) Halo de humedad alrededor de la gota (refracción suave).
+            if (!evap) {
+                drawCircle(
+                    color = Color.White.copy(alpha = 0.10f),
+                    radius = r * 1.35f,
+                    center = Offset(x, y),
+                )
+                drawCircle(
+                    color = GlassDrop.copy(alpha = 0.12f),
+                    radius = r * 1.12f,
+                    center = Offset(x, y),
+                )
+            }
+
+            // 2) Cuerpo-lente: refracta el cielo, con interior luminoso.
+            val lens = Path().apply {
+                addOval(Rect(x - r, bodyTop, x + r, bodyTop + bodyH))
+            }
+            clipPath(lens) {
+                drawRect(
+                    brush = Brush.verticalGradient(
+                        0f to horizon.copy(alpha = 0.55f),
+                        0.55f to top.copy(alpha = 0.62f),
+                        1f to horizon.copy(alpha = 0.55f),
+                    ),
+                    size = Size(r * 2f, bodyH),
+                    topLeft = Offset(x - r, bodyTop),
+                )
+                // Borde inferior oscuro (masa de agua).
+                drawOval(
+                    color = Color.Black.copy(alpha = 0.18f),
+                    topLeft = Offset(x - r * 0.95f, y + r * 0.05f),
+                    size = Size(r * 1.9f, bodyH * 0.75f),
+                )
+            }
+
+            // 3) Contorno: borde finísimo más brillante arriba.
+            drawOval(
+                color = Color.White.copy(alpha = 0.30f),
+                topLeft = Offset(x - r, bodyTop),
+                size = Size(r * 2f, bodyH),
+                style = Stroke(width = max(1f, r * 0.07f)),
             )
-            drawCircle(
-                color = GlassShade.copy(alpha = 0.32f),
-                radius = r * 0.68f,
-                center = Offset(d.x, d.y + r * 0.06f),
+
+            // 4) Borde inferior oscuro grueso: la firma del "agua sobre vidrio".
+            if (!evap) {
+                drawArc(
+                    color = Color.Black.copy(alpha = 0.22f),
+                    startAngle = 20f,
+                    sweepAngle = 140f,
+                    useCenter = false,
+                    topLeft = Offset(x - r, bodyTop),
+                    size = Size(r * 2f, bodyH),
+                    style = Stroke(width = max(2f, r * 0.18f), cap = StrokeCap.Round),
+                )
+            }
+
+            // 5) Highlight principal: arco brillante superior.
+            val arcHr = r * 0.62f
+            drawArc(
+                color = Color.White.copy(alpha = if (evap) 0.25f else 0.9f),
+                startAngle = -155f,
+                sweepAngle = 80f,
+                useCenter = false,
+                topLeft = Offset(x + r * 0.18f - arcHr, y - bodyH * 0.40f - arcHr),
+                size = Size(arcHr * 2f, arcHr * 2f),
+                style = Stroke(width = max(1.6f, r * 0.16f), cap = StrokeCap.Round),
             )
-            drawCircle(
-                color = Color.White.copy(alpha = 0.8f),
-                radius = r * 0.22f,
-                center = Offset(d.x + r * 0.32f, d.y - r * 0.32f),
-            )
+            // Punto de luz intenso.
+            if (r > 3f) {
+                drawCircle(
+                    color = Color.White.copy(alpha = 1f),
+                    radius = r * 0.12f,
+                    center = Offset(x + r * 0.34f, y - bodyH * 0.36f),
+                )
+            }
+
+            // 6) Reflejo inferior de luz (suelo/entorno) en gotas quietas.
+            if (!d.running && r > 2.5f && !evap) {
+                drawOval(
+                    color = Color.White.copy(alpha = 0.16f),
+                    topLeft = Offset(x - r * 0.30f, y + r * 0.42f),
+                    size = Size(r * 0.6f, r * 0.12f),
+                )
+            }
         }
     }
 }

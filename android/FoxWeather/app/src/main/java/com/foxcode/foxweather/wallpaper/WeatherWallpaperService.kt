@@ -1,5 +1,6 @@
 package com.foxcode.foxweather.wallpaper
 
+import android.graphics.Color
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -19,6 +20,10 @@ import com.foxcode.foxweather.environment.DayCycle
 import com.foxcode.foxweather.core.storage.SettingsStore
 import com.foxcode.foxweather.astronomy.MoonCalculator
 import com.foxcode.foxweather.environment.TimeOfDay
+import com.foxcode.foxweather.rendering.CloudSystem
+import com.foxcode.foxweather.rendering.DropletSystem
+import com.foxcode.foxweather.rendering.FogLayer
+import com.foxcode.foxweather.rendering.LightningSystem
 import com.foxcode.foxweather.rendering.RainIntensity
 import com.foxcode.foxweather.rendering.RainParticleSystem
 import com.foxcode.foxweather.scenes.SkyScene
@@ -30,15 +35,16 @@ import com.foxcode.foxweather.ui.theme.DuskMountainBack
 import com.foxcode.foxweather.ui.theme.DuskMountainFront
 import com.foxcode.foxweather.ui.theme.DuskSkyHorizon
 import com.foxcode.foxweather.ui.theme.DuskSkyTop
+import com.foxcode.foxweather.ui.theme.GlassDrop
+import com.foxcode.foxweather.ui.theme.HailColor
 import com.foxcode.foxweather.ui.theme.MoonLight
 import com.foxcode.foxweather.ui.theme.MountainBack
 import com.foxcode.foxweather.ui.theme.MountainFront
 import com.foxcode.foxweather.ui.theme.RainBlue
 import com.foxcode.foxweather.ui.theme.SkyHorizon
 import com.foxcode.foxweather.ui.theme.SkyTop
-import com.foxcode.foxweather.ui.theme.SunLight
-import com.foxcode.foxweather.ui.theme.HailColor
 import com.foxcode.foxweather.ui.theme.SnowColor
+import com.foxcode.foxweather.ui.theme.SunLight
 import com.foxcode.foxweather.weather.PrecipitationKind
 import com.foxcode.foxweather.weather.WeatherCondition
 import com.foxcode.foxweather.weather.WeatherEffects
@@ -46,6 +52,7 @@ import com.foxcode.foxweather.weather.WeatherState
 import java.io.File
 import java.time.ZoneId
 import java.time.ZonedDateTime
+import kotlin.math.max
 
 /**
  * Live wallpaper "detrás de los iconos" (FASE 2, Modo 1 de PROJECT.md).
@@ -65,6 +72,10 @@ class WeatherWallpaperService : WallpaperService() {
         private val handler = Handler(Looper.getMainLooper())
         private val scene = SkyScene()
         private val cycle = DayCycle(SettingsStore.DEFAULT_LAT, SettingsStore.DEFAULT_LON)
+        private val clouds = CloudSystem()
+        private val fogLayer = FogLayer()
+        private val lightning = LightningSystem()
+        private val droplets = DropletSystem()
         private var background = BitmapFactory.decodeFile(
             File(cacheDir, SettingsStore.CUSTOM_WALLPAPER_FILE).absolutePath
         )
@@ -80,6 +91,9 @@ class WeatherWallpaperService : WallpaperService() {
             color = RainBlue.toArgb()
         }
         private val precipPaint = Paint().apply { isAntiAlias = true }
+        private val cloudPaint = Paint().apply { isAntiAlias = true }
+        private val flashPaint = Paint().apply { isAntiAlias = true }
+        private val boltPaint = Paint().apply { isAntiAlias = true }
 
         private var visible = false
         private var running = false
@@ -200,6 +214,12 @@ class WeatherWallpaperService : WallpaperService() {
 
                 val effect = currentEffect()
                 rain.update(dt, w, h, effect.intensity, effect.kind)
+                clouds.setCover(effect.cloudCover)
+                clouds.update(dt, effect.wind)
+                lightning.update(dt)
+                drawCloudsAndroid(c, w, h)
+                if (effect.fog) drawFogAndroid(c, w, h)
+                droplets.update(dt, w, h, effect.intensity)
                 when (effect.kind) {
                     PrecipitationKind.SNOW, PrecipitationKind.HAIL -> {
                         val isHail = effect.kind == PrecipitationKind.HAIL
@@ -217,6 +237,11 @@ class WeatherWallpaperService : WallpaperService() {
                             c.drawLine(p.x, p.y, p.x + p.vx * 0.02f, p.y + p.length, rainPaint)
                         }
                     }
+                }
+                if (effect.lightning) drawLightningAndroid(c, w, h)
+                // Capa Wet Glass: gotas sobre el cristal en condiciones de lluvia.
+                if (effect.kind == PrecipitationKind.RAIN || effect.kind == PrecipitationKind.DRIZZLE) {
+                    drawDropletsAndroid(c, w, h)
                 }
             } finally {
                 if (c != null) surfaceHolder.unlockCanvasAndPost(c)
@@ -289,6 +314,153 @@ class WeatherWallpaperService : WallpaperService() {
             c.drawCircle(mx, my, mr * 1.25f, moonPaint)
             moonPaint.alpha = 242
             c.drawCircle(mx, my, mr, moonPaint)
+        }
+
+        private fun drawCloudsAndroid(c: Canvas, w: Float, h: Float) {
+            val cover = currentEffect().cloudCover
+            for (cloud in clouds.clouds) {
+                val cx = cloud.nx * w
+                val cy = cloud.ny * h
+                val cw = cloud.w * w
+                val ch = cloud.h * h
+                cloudPaint.color = Color.WHITE
+                val baseAlpha = (cloud.alpha.coerceAtMost(cover * 1.2f) * 255).toInt()
+                for (i in cloud.puffs.indices) {
+                    val frac = i.toFloat() / (cloud.puffs.size - 1)
+                    val px = cx - cw * 0.35f + cw * 0.7f * frac
+                    val py = cy + kotlin.math.sin(frac * 3.14f) * ch * 0.35f
+                    cloudPaint.alpha = baseAlpha
+                    c.drawCircle(px, py, cloud.puffs[i] * cw, cloudPaint)
+                }
+            }
+        }
+
+        private fun drawFogAndroid(c: Canvas, w: Float, h: Float) {
+            for (b in fogLayer.bands) {
+                val y = b.ny * h
+                val bw = w * 1.8f
+                val bh = b.h * h
+                cloudPaint.color = Color.WHITE
+                cloudPaint.alpha = (b.alpha * 255).toInt()
+                c.drawRect(b.nx * w * 0.5f, y - bh / 2, b.nx * w * 0.5f + bw, y + bh / 2, cloudPaint)
+            }
+        }
+
+        private fun drawLightningAndroid(c: Canvas, w: Float, h: Float) {
+            if (lightning.flashAlpha > 0.001f) {
+                flashPaint.color = Color.WHITE
+                flashPaint.alpha = (lightning.flashAlpha * 255).toInt()
+                c.drawRect(0f, 0f, w, h, flashPaint)
+            }
+            if (lightning.active && lightning.phase == LightningSystem.Phase.STRIKE) {
+                val path = Path()
+                lightning.bolt.forEachIndexed { i, (nx, ny) ->
+                    if (i == 0) path.moveTo(nx * w, ny * h) else path.lineTo(nx * w, ny * h)
+                }
+                boltPaint.color = Color.WHITE
+                boltPaint.strokeWidth = 3f
+                c.drawPath(path, boltPaint)
+                boltPaint.color = Color.rgb(0xBB, 0xD4, 0xFF)
+                boltPaint.strokeWidth = 1.5f
+                c.drawPath(path, boltPaint)
+            }
+        }
+
+        /** Wet Glass (android.graphics): pantalla mojada con gotas grandes tipo "cuenta de agua". */
+        private fun drawDropletsAndroid(c: Canvas, w: Float, h: Float) {
+            val now = ZonedDateTime.now(ZoneId.systemDefault())
+            val tod = SettingsStore.sceneOverride(applicationContext) ?: cycle.timeOfDay(now)
+            val (top, horizon) = when (tod) {
+                TimeOfDay.DAY -> DaySkyTop to DaySkyHorizon
+                TimeOfDay.SUNRISE, TimeOfDay.SUNSET -> DuskSkyTop to DuskSkyHorizon
+                TimeOfDay.NIGHT -> SkyTop to SkyHorizon
+            }
+            val lensPaint = Paint().apply { isAntiAlias = true }
+            val borderPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+            val trailPaint = Paint().apply { isAntiAlias = true }
+            val hiPaint = Paint().apply { isAntiAlias = true; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND }
+            val fillPaint = Paint().apply { isAntiAlias = true }
+            val haloPaint = Paint().apply { isAntiAlias = true }
+
+            // 0) Estelas lavadas.
+            for (t in droplets.trails) {
+                trailPaint.color = android.graphics.Color.WHITE
+                trailPaint.alpha = (t.alpha * 255).toInt()
+                c.drawRect(t.x - t.width / 2, t.topY, t.x + t.width / 2, t.topY + t.length, trailPaint)
+            }
+
+            for (d in droplets.drops) {
+                if (d.falling) continue
+                val r = max(d.r, 0.5f)
+                val x = d.x
+                val y = d.y
+                val evap = d.evaporating
+                val bodyH = r * (if (d.running) 1f + d.stretch else 1f)
+                val bodyTop = y - bodyH / 2
+
+                // 1) Halo de humedad.
+                if (!evap) {
+                    haloPaint.color = android.graphics.Color.WHITE
+                    haloPaint.alpha = 26
+                    c.drawCircle(x, y, r * 1.35f, haloPaint)
+                    haloPaint.color = GlassDrop.toArgb()
+                    haloPaint.alpha = 32
+                    c.drawCircle(x, y, r * 1.12f, haloPaint)
+                }
+
+                // 2) Cuerpo-lente con interior luminoso.
+                val save = c.save()
+                val lens = Path().apply { addOval(android.graphics.RectF(x - r, bodyTop, x + r, bodyTop + bodyH), Path.Direction.CW) }
+                c.clipPath(lens)
+                lensPaint.shader = LinearGradient(
+                    x - r, bodyTop, x - r, bodyTop + bodyH,
+                    intArrayOf(horizon.toArgb(), top.toArgb(), horizon.toArgb()),
+                    floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP,
+                )
+                lensPaint.alpha = 150
+                c.drawRect(x - r, bodyTop, x + r, bodyTop + bodyH, lensPaint)
+                // Masa de agua: borde inferior oscuro.
+                fillPaint.color = android.graphics.Color.argb(45, 0, 0, 0)
+                c.drawOval(x - r * 0.95f, y + r * 0.05f, x + r * 0.95f, y + r * 0.05f + bodyH * 0.75f, fillPaint)
+                c.restoreToCount(save)
+
+                // 3) Contorno brillante fino.
+                borderPaint.color = android.graphics.Color.WHITE
+                borderPaint.alpha = 80
+                borderPaint.strokeWidth = max(1f, r * 0.07f)
+                c.drawOval(x - r, bodyTop, x + r, bodyTop + bodyH, borderPaint)
+
+                // 4) Borde inferior oscuro grueso.
+                if (!evap) {
+                    borderPaint.color = android.graphics.Color.BLACK
+                    borderPaint.alpha = 60
+                    borderPaint.strokeWidth = max(2f, r * 0.18f)
+                    val bottomArc = Path()
+                    bottomArc.addArc(android.graphics.RectF(x - r, bodyTop, x + r, bodyTop + bodyH), 20f, 140f)
+                    c.drawPath(bottomArc, borderPaint)
+                }
+
+                // 5) Highlight: arco brillante superior.
+                hiPaint.color = android.graphics.Color.WHITE
+                hiPaint.alpha = if (evap) 60 else 230
+                hiPaint.strokeWidth = max(1.6f, r * 0.16f)
+                val arcHr = r * 0.62f
+                val topArc = Path()
+                topArc.addArc(android.graphics.RectF(x + r * 0.18f - arcHr, y - bodyH * 0.40f - arcHr, x + r * 0.18f + arcHr, y - bodyH * 0.40f + arcHr), -155f, 80f)
+                c.drawPath(topArc, hiPaint)
+                if (r > 3f) {
+                    fillPaint.color = android.graphics.Color.WHITE
+                    fillPaint.alpha = 255
+                    c.drawCircle(x + r * 0.34f, y - bodyH * 0.36f, r * 0.12f, fillPaint)
+                }
+
+                // 6) Reflejo inferior en gotas quietas.
+                if (!d.running && r > 2.5f && !evap) {
+                    fillPaint.color = android.graphics.Color.WHITE
+                    fillPaint.alpha = 42
+                    c.drawOval(x - r * 0.30f, y + r * 0.42f, x - r * 0.30f + r * 0.6f, y + r * 0.42f + r * 0.12f, fillPaint)
+                }
+            }
         }
 
         private fun drawCrestAndroid(

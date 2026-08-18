@@ -1,15 +1,19 @@
 package com.foxcode.foxweather.wallpaper
 
-import android.graphics.Color
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.Rect
 import android.graphics.Shader
+import android.os.BatteryManager
 import android.os.Handler
 import android.os.Looper
 import android.service.wallpaper.WallpaperService
@@ -64,6 +68,8 @@ import kotlin.math.max
  */
 class WeatherWallpaperService : WallpaperService() {
 
+    enum class BatteryState { NORMAL, HOT, LOW, CRITICAL }
+
     override fun onCreateEngine(): Engine = WeatherEngine()
 
     private inner class WeatherEngine : Engine() {
@@ -99,7 +105,15 @@ class WeatherWallpaperService : WallpaperService() {
         private var running = false
         private var lastNanos = 0L
         private var targetFps = 30
+        private var baseFps = 30
         private var intensity = RainIntensity.MEDIUM
+        private var battery = BatteryState.NORMAL
+
+        private val batteryReceiver = object : BroadcastReceiver() {
+            override fun onReceive(c: Context?, intent: Intent?) {
+                refreshBattery()
+            }
+        }
 
         private val frame = object : Runnable {
             override fun run() {
@@ -114,8 +128,57 @@ class WeatherWallpaperService : WallpaperService() {
             intensity = prefs.getString(KEY_INTENSITY, null)
                 ?.let { runCatching { RainIntensity.valueOf(it) }.getOrNull() }
                 ?: RainIntensity.MEDIUM
-            targetFps = prefs.getInt(KEY_FPS, 30).coerceIn(1, 60)
+            baseFps = prefs.getInt(KEY_FPS, 30).coerceIn(1, 60)
+            targetFps = baseFps
             recreateBackground()
+            refreshBattery()
+            val filter = IntentFilter().apply {
+                addAction(Intent.ACTION_BATTERY_LOW)
+                addAction(Intent.ACTION_POWER_CONNECTED)
+                addAction(Intent.ACTION_POWER_DISCONNECTED)
+                addAction(Intent.ACTION_BATTERY_CHANGED)
+            }
+            registerReceiver(batteryReceiver, filter)
+        }
+
+        override fun onDestroy() {
+            runCatching { unregisterReceiver(batteryReceiver) }
+            stopLoop()
+            super.onDestroy()
+        }
+
+        /** Nivel + temperatura de batería. Solo se invoca ante eventos de batería. */
+        private fun refreshBattery() {
+            val bIntent = registerReceiver(
+                null,
+                IntentFilter(Intent.ACTION_BATTERY_CHANGED),
+            ) ?: return
+            val level = bIntent.getIntExtra(BatteryManager.EXTRA_LEVEL, 100)
+            val scale = bIntent.getIntExtra(BatteryManager.EXTRA_SCALE, 100)
+            val temp = (bIntent.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 250) / 10f).coerceAtLeast(0f)
+            val charging = bIntent.getIntExtra(BatteryManager.EXTRA_STATUS, -1) == BatteryManager.BATTERY_STATUS_CHARGING
+            val pct = if (scale > 0) level * 100 / scale else 100
+            battery = when {
+                !charging && (pct <= 10 || temp >= 50f) -> BatteryState.CRITICAL
+                !charging && (pct <= 25 || temp >= 42f) -> BatteryState.LOW
+                temp >= 38f -> BatteryState.HOT
+                else -> BatteryState.NORMAL
+            }
+            applyBatteryPolicy()
+        }
+
+        /** Degrada FPS suavemente según el estado de batería (FASE 7). */
+        private fun applyBatteryPolicy() {
+            when (battery) {
+                BatteryState.NORMAL -> targetFps = baseFps
+                BatteryState.HOT -> targetFps = max(10, baseFps * 2 / 3)
+                BatteryState.LOW -> targetFps = max(8, baseFps / 2)
+                BatteryState.CRITICAL -> {
+                    targetFps = 6
+                    rain.particles.clear()
+                    droplets.clear()
+                }
+            }
         }
 
         /** Recarga la imagen custom (si cambió en la app) sin reiniciar el servicio. */
@@ -155,11 +218,6 @@ class WeatherWallpaperService : WallpaperService() {
                 ((w + bw) / 2).toInt(), ((h + bh) / 2).toInt(),
             )
             c.drawBitmap(bmp, src, dst, imagePaint)
-        }
-
-        override fun onDestroy() {
-            stopLoop()
-            super.onDestroy()
         }
 
         override fun onVisibilityChanged(v: Boolean) {
